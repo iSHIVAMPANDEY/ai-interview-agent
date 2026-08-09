@@ -5,16 +5,14 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from openai import OpenAI
 from pydantic import BaseModel, Field
-
 
 BASE_DIR = Path(__file__).resolve().parent
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 MODEL = "llama-3.3-70b-versatile"
 QUESTION_LIMIT = 8
-
 
 def load_json_file(*candidates: str) -> dict[str, Any]:
     for candidate in candidates:
@@ -26,10 +24,6 @@ def load_json_file(*candidates: str) -> dict[str, Any]:
         f"Could not find any of the required data files: {', '.join(candidates)}"
     )
 
-
-# The uploaded files remain in attached_assets; the aliases make the expected
-# CANDIDATES.JSON and CURRICULUM.JSON names explicit while keeping one source
-# of truth for the data.
 CANDIDATES = load_json_file(
     "CANDIDATES.JSON",
     "CANDIDATES.json",
@@ -41,8 +35,11 @@ CURRICULUM = load_json_file(
     "attached_assets/curriculum_1786277540093.json",
 )
 
+# FIX 1: Check for both key names so Vercel doesn't crash on boot
+api_key = os.environ.get("GROQ_API_KEY") or os.environ.get("OPENAI_API_KEY")
+
 client = OpenAI(
-    api_key=os.environ.get("GROQ_API_KEY"),
+    api_key=api_key,
     base_url=GROQ_BASE_URL,
 )
 app = FastAPI(title="AI Interview Agent")
@@ -51,15 +48,12 @@ app = FastAPI(title="AI Interview Agent")
 class AIServiceError(RuntimeError):
     """Raised when the configured Groq service cannot complete a request."""
 
-
 class StartRequest(BaseModel):
     candidate_id: str | None = Field(default=None, description="Optional candidate ID")
-
 
 class ChatRequest(BaseModel):
     session_id: str
     message: str = Field(min_length=1, max_length=8000)
-
 
 class InterviewSession:
     def __init__(self, candidate: dict[str, Any], system_prompt: str) -> None:
@@ -69,9 +63,7 @@ class InterviewSession:
         self.answers = 0
         self.complete = False
 
-
 sessions: dict[str, InterviewSession] = {}
-
 
 def candidate_profile(candidate: dict[str, Any]) -> str:
     member = candidate["member"]
@@ -97,7 +89,6 @@ def candidate_profile(candidate: dict[str, Any]) -> str:
         indent=2,
     )
 
-
 def curriculum_outline() -> str:
     modules = [
         {
@@ -117,7 +108,6 @@ def curriculum_outline() -> str:
         for day in CURRICULUM.get("days", [])
     ]
     return json.dumps({"cohort": CURRICULUM.get("cohort"), "modules": modules, "days": days}, indent=2)
-
 
 def build_system_prompt(candidate: dict[str, Any]) -> str:
     return f"""
@@ -141,7 +131,6 @@ Interview rules:
 - This is question {QUESTION_LIMIT} only when the interviewer explicitly reaches it.
 """.strip()
 
-
 def call_model(messages: list[dict[str, str]], temperature: float = 0.7) -> str:
     try:
         completion = client.chat.completions.create(
@@ -159,7 +148,6 @@ def call_model(messages: list[dict[str, str]], temperature: float = 0.7) -> str:
         raise RuntimeError("The model returned an empty response.")
     return content.strip()
 
-
 def find_candidate(candidate_id: str | None) -> dict[str, Any]:
     candidates = CANDIDATES.get("candidates", [])
     if not candidates:
@@ -170,7 +158,6 @@ def find_candidate(candidate_id: str | None) -> dict[str, Any]:
                 return candidate
         raise HTTPException(status_code=404, detail="Candidate not found.")
     return candidates[0]
-
 
 def parse_feedback(raw: str) -> dict[str, Any]:
     cleaned = raw.strip()
@@ -193,26 +180,25 @@ def parse_feedback(raw: str) -> dict[str, Any]:
         "summary": result.get("summary", ""),
     }
 
-
+# FIX 2: Replaced FileResponse with HTMLResponse which is 100% stable on Vercel
 @app.get("/")
-async def root() -> FileResponse:
-    return FileResponse(BASE_DIR / "index.html")
-
+async def root() -> HTMLResponse:
+    html_path = BASE_DIR / "index.html"
+    if html_path.exists():
+        return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+    return HTMLResponse(content="<h1>index.html not found</h1>", status_code=404)
 
 @app.exception_handler(AIServiceError)
 async def ai_service_error_handler(_, error: AIServiceError) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(error)})
 
-
 @app.get("/favicon.ico")
 async def favicon() -> Response:
     return Response(status_code=204)
 
-
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
-
 
 @app.post("/start")
 async def start_interview(request: StartRequest | None = None) -> dict[str, str]:
@@ -232,7 +218,6 @@ async def start_interview(request: StartRequest | None = None) -> dict[str, str]
     session.messages.append({"role": "assistant", "content": first_question})
     sessions[session_id] = session
     return {"session_id": session_id, "question": first_question}
-
 
 @app.post("/chat")
 async def chat(request: ChatRequest) -> dict[str, Any]:
@@ -278,7 +263,6 @@ async def chat(request: ChatRequest) -> dict[str, Any]:
 
     session.messages.append({"role": "assistant", "content": response})
     return {"response": response, "complete": session.complete}
-
 
 @app.get("/feedback/{session_id}")
 async def feedback(session_id: str) -> dict[str, Any]:
